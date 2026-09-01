@@ -171,6 +171,23 @@ export class StaffService {
     return staff;
   }
 
+  /** Case-insensitive exact name match — mirrors ParticipantsService.existsByName. */
+  async existsByName(
+    institutionId: string,
+    firstName: string,
+    lastName: string,
+  ): Promise<boolean> {
+    const exists = await this.staffModel
+      .exists({
+        institutionId,
+        isDeleted: false,
+        firstName: new RegExp(`^${escapeRegex(firstName.trim())}$`, 'i'),
+        lastName: new RegExp(`^${escapeRegex(lastName.trim())}$`, 'i'),
+      })
+      .exec();
+    return !!exists;
+  }
+
   /** Resolves the Staff record linked to a STAFF-role User (mirrors resolveOwnParticipantId). */
   private async resolveOwnStaffId(
     user: AuthenticatedUser,

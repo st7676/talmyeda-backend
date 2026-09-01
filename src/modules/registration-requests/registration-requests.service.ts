@@ -5,6 +5,7 @@ import { FieldEntityType, InstitutionStatus, Role } from '../../common/enums';
 import { AppError } from '../../common/errors/app-error';
 import { PaginatedResult } from '../../common/interfaces';
 import { hashPassword } from '../../common/utils/password.util';
+import { escapeRegex } from '../../common/utils/regex.util';
 import { DynamicFieldsValidatorService } from '../dynamic-fields/dynamic-fields-validator.service';
 import { FieldDefinitionsService } from '../field-definitions/field-definitions.service';
 import { InstitutionsService } from '../institutions/institutions.service';
@@ -80,6 +81,68 @@ export class RegistrationRequestsService {
   }
 
   /**
+   * Two duplicate cases, checked in order of likelihood:
+   * 1. Someone with this exact name is already an approved Participant/
+   *    Staff member of this institution — most likely they already went
+   *    through this once and forgot their login, not a genuine second
+   *    person who happens to share a name.
+   * 2. There's already a Pending request with this exact name/entityType —
+   *    most likely an accidental double-submit, not a race between two
+   *    different people.
+   * Exact (case-insensitive, trimmed) match only — not fuzzy/typo-tolerant,
+   * so two unrelated people who legitimately share a name will still both
+   * get through and land in front of an Admin to sort out manually, same
+   * as before this existed.
+   */
+  private async assertNoDuplicate(
+    institutionId: string,
+    entityType: FieldEntityType.Participant | FieldEntityType.Staff,
+    firstName: string,
+    lastName: string,
+  ): Promise<void> {
+    const alreadyApproved =
+      entityType === FieldEntityType.Staff
+        ? await this.staffService.existsByName(
+            institutionId,
+            firstName,
+            lastName,
+          )
+        : await this.participantsService.existsByName(
+            institutionId,
+            firstName,
+            lastName,
+          );
+    if (alreadyApproved) {
+      throw AppError.conflict(
+        'A record with this name already exists at this institution. If this is you, contact the institution for your login details instead of registering again.',
+        'DUPLICATE_NAME',
+      );
+    }
+
+    const pendingDuplicate = await this.requestModel
+      .exists({
+        institutionId,
+        entityType,
+        status: RegistrationRequestStatus.Pending,
+        'requestedData.firstName': new RegExp(
+          `^${escapeRegex(firstName.trim())}$`,
+          'i',
+        ),
+        'requestedData.lastName': new RegExp(
+          `^${escapeRegex(lastName.trim())}$`,
+          'i',
+        ),
+      })
+      .exec();
+    if (pendingDuplicate) {
+      throw AppError.conflict(
+        'A pending registration request with this name already exists. Please wait for the institution to respond instead of submitting again.',
+        'DUPLICATE_PENDING_REQUEST',
+      );
+    }
+  }
+
+  /**
    * POST /registration-requests. Spec sections 13, 84. Public — the
    * submitter is not authenticated, so institutionId travels in the body
    * (documented exception, see the DTO's comment).
@@ -89,6 +152,20 @@ export class RegistrationRequestsService {
   ): Promise<RegistrationRequestDocument> {
     await this.assertSelfRegistrationOpen(dto.institutionId);
     const entityType = dto.entityType ?? FieldEntityType.Participant;
+
+    // Duplicate detection (spec 13.1 originally documented this as
+    // "left to manual admin review" — v1 shipped with none at all. Added
+    // per explicit product request: catches the two realistic cases
+    // (already-approved person re-registering because they forgot their
+    // credentials, and an accidental double-submit of the same pending
+    // request) without being a fuzzy/typo-tolerant matcher — same name,
+    // same institution, same entity type, exact (case-insensitive) match.
+    await this.assertNoDuplicate(
+      dto.institutionId,
+      entityType,
+      dto.firstName,
+      dto.lastName,
+    );
 
     // Dynamic-field validation (spec 36-37: unknown-key rejection, type/
     // required checks, field-level write permission) was previously never
@@ -109,8 +186,6 @@ export class RegistrationRequestsService {
       customFields: dto.customFields ?? [],
     });
 
-    // v1 performs no automatic duplicate detection (spec 13.1) — duplicates
-    // are allowed and left to manual admin review.
     return this.requestModel.create({
       institutionId: dto.institutionId,
       entityType,

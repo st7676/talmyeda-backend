@@ -226,6 +226,28 @@ export class ParticipantsService {
   }
 
   /**
+   * Case-insensitive exact name match, used by self-registration duplicate
+   * detection (RegistrationRequestsService) — not a fuzzy/typo-tolerant
+   * check, just enough to catch "I already registered, let me try again"
+   * or an admin re-approving the same person twice.
+   */
+  async existsByName(
+    institutionId: string,
+    firstName: string,
+    lastName: string,
+  ): Promise<boolean> {
+    const exists = await this.participantModel
+      .exists({
+        institutionId,
+        isDeleted: false,
+        firstName: new RegExp(`^${escapeRegex(firstName.trim())}$`, 'i'),
+        lastName: new RegExp(`^${escapeRegex(lastName.trim())}$`, 'i'),
+      })
+      .exec();
+    return !!exists;
+  }
+
+  /**
    * Context-aware relationship scoping (spec 519, 833):
    * STAFF only sees Participants in groups they're assigned to via
    * StaffGroup, when the institution has staffGroupManagementEnabled.
